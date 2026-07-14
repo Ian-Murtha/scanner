@@ -109,7 +109,7 @@
 <script>
   // Bump this string whenever the app is updated — makes it easy to confirm
   // you're looking at the latest deployed version.
-  const APP_VERSION = '2026-07-14.1';
+  const APP_VERSION = '2026-07-14.2';
 
   const statusEl = document.getElementById('status');
   const logEl = document.getElementById('log');
@@ -210,7 +210,30 @@
     setStatus('Added: ' + decodedText, 'flash');
   }
 
-  const config = { fps: 10, qrbox: { width: 250, height: 150 } };
+  const config = {
+    fps: 15,
+    // Larger box = don't need to line the barcode up perfectly in a tiny target.
+    qrbox: (viewfinderWidth, viewfinderHeight) => {
+      const w = Math.floor(viewfinderWidth * 0.9);
+      const h = Math.floor(viewfinderHeight * 0.5);
+      return { width: w, height: h };
+    },
+    aspectRatio: 1.5,
+    disableFlip: false,
+    // Use the browser's native barcode detector when available — faster and
+    // more tolerant of angle/blur than the pure-JS fallback scanner.
+    experimentalFeatures: {
+      useBarCodeDetectorIfSupported: true
+    },
+    videoConstraints: {
+      facingMode: "environment",
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      // Request continuous autofocus where supported, so close-up barcodes
+      // aren't stuck out of focus.
+      advanced: [{ focusMode: "continuous" }]
+    }
+  };
   let cameraStarted = false;
   let html5QrCode;
 
@@ -233,7 +256,7 @@
       html5QrCode = new Html5Qrcode("reader");
       // Prefer the back camera; fall back to any camera if that fails.
       await html5QrCode.start(
-        { facingMode: "environment" },
+        config.videoConstraints,
         config,
         onScanSuccess,
         () => {}
