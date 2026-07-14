@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Barcode → Excel</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --accent: #4f8cff;
+    --text: #eef1f6;
+    --muted: #9aa3b2;
+    --good: #2ecc71;
+    --bad: #ff6b6b;
+    --border: #2a2e38;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Roboto, Segoe UI, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 16px;
+    max-width: 480px;
+    margin-inline: auto;
+  }
+  h1 { font-size: 20px; margin: 4px 0 16px; text-align: center; }
+  #reader {
+    width: 100%;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: #000;
+  }
+  .status {
+    text-align: center;
+    margin: 10px 0;
+    color: var(--muted);
+    font-size: 14px;
+    min-height: 20px;
+  }
+  .status.flash { color: var(--good); font-weight: 600; }
+  .status.error { color: var(--bad); font-weight: 600; }
+  .row { display: flex; gap: 8px; margin: 12px 0; }
+  button {
+    flex: 1;
+    padding: 12px;
+    border: none;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  button.primary { background: var(--accent); color: white; border: none; }
+  button:active { opacity: 0.8; }
+  #count { text-align: center; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+  ul#log {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0 0;
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  ul#log li {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+    display: flex;
+    justify-content: space-between;
+  }
+  ul#log li:last-child { border-bottom: none; }
+  ul#log li span.del { color: var(--bad); cursor: pointer; font-weight: bold; padding-left: 10px; }
+</style>
+</head>
+<body>
+  <h1>Barcode → Excel</h1>
+  <div id="reader"></div>
+  <div class="status" id="status">Point camera at a barcode</div>
+
+  <div class="row">
+    <button class="primary" id="downloadBtn">⬇️ Download .xlsx</button>
+    <button id="refreshBtn">🔄 Refresh list</button>
+  </div>
+
+  <div id="count">0 entries</div>
+  <ul id="log"></ul>
+
+<script src="config.js"></script>
+<script>
+  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const TABLE = 'scans';
+
+  const statusEl = document.getElementById('status');
+  const logEl = document.getElementById('log');
+  const countEl = document.getElementById('count');
+
+  let entries = []; // [{id, code}]
+
+  function setStatus(msg, cls) {
+    statusEl.textContent = msg;
+    statusEl.className = 'status' + (cls ? ' ' + cls : '');
+    if (cls) setTimeout(() => { statusEl.className = 'status'; }, 1200);
+  }
+
+  function render() {
+    logEl.innerHTML = '';
+    entries.slice().reverse().forEach(row => {
+      const li = document.createElement('li');
+      li.innerHTML = `<span>${row.code}</span><span class="del" data-id="${row.id}">✕</span>`;
+      logEl.appendChild(li);
+    });
+    countEl.textContent = entries.length + ' entries';
+  }
+
+  async function loadEntries() {
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select('id, code, created_at')
+      .order('created_at', { ascending: true });
+    if (error) {
+      setStatus('Load error: ' + error.message, 'error');
+      return;
+    }
+    entries = data;
+    render();
+  }
+
+  logEl.addEventListener('click', async (e) => {
+    if (e.target.classList.contains('del')) {
+      const id = e.target.dataset.id;
+      const { error } = await supabase.from(TABLE).delete().eq('id', id);
+      if (error) { setStatus('Delete failed: ' + error.message, 'error'); return; }
+      entries = entries.filter(r => String(r.id) !== String(id));
+      render();
+    }
+  });
+
+  document.getElementById('refreshBtn').addEventListener('click', loadEntries);
+
+  let lastCode = null;
+  let lastTime = 0;
+
+  async function onScanSuccess(decodedText) {
+    const now = Date.now();
+    if (decodedText === lastCode && now - lastTime < 2500) return;
+    lastCode = decodedText;
+    lastTime = now;
+
+    const { data, error } = await supabase
+      .from(TABLE)
+      .insert({ code: decodedText })
+      .select()
+      .single();
+
+    if (error) {
+      setStatus('Save failed: ' + error.message, 'error');
+      return;
+    }
+
+    entries.push(data);
+    render();
+    setStatus('Added: ' + decodedText, 'flash');
+  }
+
+  const html5QrCode = new Html5Qrcode("reader");
+  const config = { fps: 10, qrbox: { width: 250, height: 150 } };
+
+  html5QrCode.start(
+    { facingMode: "environment" },
+    config,
+    onScanSuccess,
+    () => {}
+  ).catch(err => {
+    setStatus('Camera error: ' + err, 'error');
+  });
+
+  document.getElementById('downloadBtn').addEventListener('click', () => {
+    const ws = XLSX.utils.aoa_to_sheet(entries.map(r => [r.code]));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Barcodes');
+    XLSX.writeFile(wb, 'barcodes.xlsx');
+  });
+
+  loadEntries();
+
+  // Live updates if you scan from multiple devices/sessions
+  supabase
+    .channel('scans-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: TABLE }, loadEntries)
+    .subscribe();
+</script>
+</body>
+</html>
