@@ -84,8 +84,11 @@
 <body>
   <h1>Barcode → Excel</h1>
   <div id="reader"></div>
-  <div class="status" id="status">Point camera at a barcode</div>
+  <div class="status" id="status">Tap "Start Camera" to begin</div>
 
+  <div class="row">
+    <button class="primary" id="startBtn">📷 Start Camera</button>
+  </div>
   <div class="row">
     <button class="primary" id="downloadBtn">⬇️ Download .xlsx</button>
     <button id="refreshBtn">🔄 Refresh list</button>
@@ -173,14 +176,47 @@
 
   const html5QrCode = new Html5Qrcode("reader");
   const config = { fps: 10, qrbox: { width: 250, height: 150 } };
+  let cameraStarted = false;
 
-  html5QrCode.start(
-    { facingMode: "environment" },
-    config,
-    onScanSuccess,
-    () => {}
-  ).catch(err => {
-    setStatus('Camera error: ' + err, 'error');
+  document.getElementById('startBtn').addEventListener('click', async () => {
+    if (cameraStarted) return;
+
+    if (!window.isSecureContext) {
+      setStatus('Camera blocked: page is not served over HTTPS.', 'error');
+      return;
+    }
+
+    setStatus('Requesting camera permission…');
+
+    try {
+      // Prefer the back camera; fall back to any camera if that fails.
+      await html5QrCode.start(
+        { facingMode: "environment" },
+        config,
+        onScanSuccess,
+        () => {}
+      );
+      cameraStarted = true;
+      setStatus('Point camera at a barcode');
+    } catch (err) {
+      try {
+        const cameras = await Html5Qrcode.getCameras();
+        if (!cameras || cameras.length === 0) {
+          setStatus('No camera found on this device.', 'error');
+          return;
+        }
+        await html5QrCode.start(
+          cameras[0].id,
+          config,
+          onScanSuccess,
+          () => {}
+        );
+        cameraStarted = true;
+        setStatus('Point camera at a barcode');
+      } catch (err2) {
+        setStatus('Camera error: ' + (err2.message || err2), 'error');
+      }
+    }
   });
 
   document.getElementById('downloadBtn').addEventListener('click', () => {
