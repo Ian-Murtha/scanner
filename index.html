@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Barcode → Excel</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
@@ -61,6 +64,7 @@
   button.primary { background: var(--accent); color: white; border: none; }
   button:active { opacity: 0.8; }
   #count { text-align: center; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+  #version { text-align: center; color: var(--muted); font-size: 11px; margin-top: 16px; opacity: 0.6; }
   ul#log {
     list-style: none;
     padding: 0;
@@ -93,15 +97,25 @@
     <button class="primary" id="downloadBtn">⬇️ Download .xlsx</button>
     <button id="refreshBtn">🔄 Refresh list</button>
   </div>
+  <div class="row">
+    <button id="updateBtn">🔁 Check for Update</button>
+  </div>
+  <div id="version"></div>
 
   <div id="count">0 entries</div>
   <ul id="log"></ul>
 
 <script src="config.js"></script>
 <script>
+  // Bump this string whenever the app is updated — makes it easy to confirm
+  // you're looking at the latest deployed version.
+  const APP_VERSION = '2026-07-14.1';
+
   const statusEl = document.getElementById('status');
   const logEl = document.getElementById('log');
   const countEl = document.getElementById('count');
+  const versionEl = document.getElementById('version');
+  versionEl.textContent = 'Version ' + APP_VERSION;
 
   // Surface any uncaught error on screen instead of failing silently.
   window.addEventListener('error', (e) => {
@@ -111,7 +125,7 @@
     }
   });
 
-  let supabase;
+  let supabaseClient;
   try {
     if (typeof SUPABASE_URL === 'undefined' || typeof SUPABASE_ANON_KEY === 'undefined') {
       throw new Error('config.js did not define SUPABASE_URL / SUPABASE_ANON_KEY');
@@ -119,7 +133,7 @@
     if (!window.supabase) {
       throw new Error('Supabase library failed to load (check network/CDN access)');
     }
-    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   } catch (e) {
     statusEl.textContent = 'Setup error: ' + e.message;
     statusEl.className = 'status error';
@@ -147,7 +161,7 @@
   }
 
   async function loadEntries() {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseClient
       .from(TABLE)
       .select('id, code, created_at')
       .order('created_at', { ascending: true });
@@ -162,7 +176,7 @@
   logEl.addEventListener('click', async (e) => {
     if (e.target.classList.contains('del')) {
       const id = e.target.dataset.id;
-      const { error } = await supabase.from(TABLE).delete().eq('id', id);
+      const { error } = await supabaseClient.from(TABLE).delete().eq('id', id);
       if (error) { setStatus('Delete failed: ' + error.message, 'error'); return; }
       entries = entries.filter(r => String(r.id) !== String(id));
       render();
@@ -180,7 +194,7 @@
     lastCode = decodedText;
     lastTime = now;
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseClient
       .from(TABLE)
       .insert({ code: decodedText })
       .select()
@@ -254,10 +268,37 @@
     XLSX.writeFile(wb, 'barcodes.xlsx');
   });
 
+  document.getElementById('updateBtn').addEventListener('click', async () => {
+    setStatus('Checking for update…');
+    try {
+      const bustUrl = location.pathname + '?_=' + Date.now();
+      const res = await fetch(bustUrl, { cache: 'no-store' });
+      const html = await res.text();
+      const match = html.match(/const APP_VERSION = '([^']+)'/);
+      const liveVersion = match ? match[1] : null;
+
+      if (!liveVersion) {
+        setStatus('Could not read version from live page.', 'error');
+        return;
+      }
+      if (liveVersion === APP_VERSION) {
+        setStatus('You already have the latest version (' + APP_VERSION + ').', 'flash');
+        return;
+      }
+      setStatus('Update found (' + liveVersion + ') — reloading…', 'flash');
+      // Force a cache-bypassing reload by navigating to a cache-busted URL.
+      setTimeout(() => {
+        window.location.href = bustUrl;
+      }, 800);
+    } catch (e) {
+      setStatus('Update check failed: ' + e.message, 'error');
+    }
+  });
+
   loadEntries();
 
   // Live updates if you scan from multiple devices/sessions
-  supabase
+  supabaseClient
     .channel('scans-changes')
     .on('postgres_changes', { event: '*', schema: 'public', table: TABLE }, loadEntries)
     .subscribe();
