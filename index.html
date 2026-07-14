@@ -32,12 +32,20 @@
     margin-inline: auto;
   }
   h1 { font-size: 20px; margin: 4px 0 16px; text-align: center; }
-  #reader {
+  #videoWrap {
+    position: relative;
     width: 100%;
     border-radius: 12px;
     overflow: hidden;
     border: 1px solid var(--border);
     background: #000;
+    aspect-ratio: 4 / 3;
+  }
+  video#preview {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
   }
   .status {
     text-align: center;
@@ -46,15 +54,14 @@
     font-size: 14px;
     min-height: 20px;
   }
-  .status.flash { color: var(--good); font-weight: 600; }
   .status.error { color: var(--bad); font-weight: 600; }
   .row { display: flex; gap: 8px; margin: 12px 0; }
   button {
     flex: 1;
-    padding: 12px;
+    padding: 14px;
     border: none;
     border-radius: 10px;
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 600;
     cursor: pointer;
     background: var(--panel);
@@ -62,7 +69,14 @@
     border: 1px solid var(--border);
   }
   button.primary { background: var(--accent); color: white; border: none; }
+  button.capture {
+    background: var(--good);
+    color: #06210f;
+    font-size: 18px;
+    padding: 18px;
+  }
   button:active { opacity: 0.8; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
   #count { text-align: center; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
   #version { text-align: center; color: var(--muted); font-size: 11px; margin-top: 16px; opacity: 0.6; }
   ul#log {
@@ -83,15 +97,46 @@
   }
   ul#log li:last-child { border-bottom: none; }
   ul#log li span.del { color: var(--bad); cursor: pointer; font-weight: bold; padding-left: 10px; }
+
+  /* Big success/failure banner */
+  #banner {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    text-align: center;
+    padding: 24px;
+    z-index: 1000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+  }
+  #banner.show { opacity: 1; }
+  #banner.success { background: rgba(46, 204, 113, 0.96); color: #06210f; }
+  #banner.failure { background: rgba(255, 107, 107, 0.96); color: #2b0b0b; }
+  #banner .icon { font-size: 72px; line-height: 1; }
+  #banner .code { font-size: 26px; font-weight: 700; word-break: break-all; }
+  #banner .sub { font-size: 15px; opacity: 0.85; }
+
+  #hidden-file-reader { display: none; }
 </style>
 </head>
 <body>
   <h1>Barcode → Excel</h1>
-  <div id="reader"></div>
+
+  <div id="videoWrap">
+    <video id="preview" autoplay muted playsinline></video>
+  </div>
   <div class="status" id="status">Tap "Start Camera" to begin</div>
 
   <div class="row">
     <button class="primary" id="startBtn">📷 Start Camera</button>
+  </div>
+  <div class="row">
+    <button class="capture" id="captureBtn" disabled>📸 Capture &amp; Decode</button>
   </div>
   <div class="row">
     <button class="primary" id="downloadBtn">⬇️ Download .xlsx</button>
@@ -100,16 +145,23 @@
   <div class="row">
     <button id="updateBtn">🔁 Check for Update</button>
   </div>
-  <div id="version"></div>
 
   <div id="count">0 entries</div>
   <ul id="log"></ul>
+  <div id="version"></div>
+  <div id="hidden-file-reader"></div>
+
+  <div id="banner">
+    <div class="icon" id="bannerIcon"></div>
+    <div class="code" id="bannerCode"></div>
+    <div class="sub" id="bannerSub"></div>
+  </div>
 
 <script src="config.js"></script>
 <script>
   // Bump this string whenever the app is updated — makes it easy to confirm
   // you're looking at the latest deployed version.
-  const APP_VERSION = '2026-07-14.2';
+  const APP_VERSION = '2026-07-14.3';
 
   const statusEl = document.getElementById('status');
   const logEl = document.getElementById('log');
@@ -117,7 +169,6 @@
   const versionEl = document.getElementById('version');
   versionEl.textContent = 'Version ' + APP_VERSION;
 
-  // Surface any uncaught error on screen instead of failing silently.
   window.addEventListener('error', (e) => {
     if (statusEl) {
       statusEl.textContent = 'Script error: ' + e.message;
@@ -141,13 +192,11 @@
   }
 
   const TABLE = 'scans';
-
   let entries = []; // [{id, code}]
 
   function setStatus(msg, cls) {
     statusEl.textContent = msg;
     statusEl.className = 'status' + (cls ? ' ' + cls : '');
-    if (cls) setTimeout(() => { statusEl.className = 'status'; }, 1200);
   }
 
   function render() {
@@ -185,103 +234,106 @@
 
   document.getElementById('refreshBtn').addEventListener('click', loadEntries);
 
-  let lastCode = null;
-  let lastTime = 0;
+  // ---- Big success/failure banner ----
+  const bannerEl = document.getElementById('banner');
+  const bannerIcon = document.getElementById('bannerIcon');
+  const bannerCode = document.getElementById('bannerCode');
+  const bannerSub = document.getElementById('bannerSub');
+  let bannerTimeout;
 
-  async function onScanSuccess(decodedText) {
-    const now = Date.now();
-    if (decodedText === lastCode && now - lastTime < 2500) return;
-    lastCode = decodedText;
-    lastTime = now;
-
-    const { data, error } = await supabaseClient
-      .from(TABLE)
-      .insert({ code: decodedText })
-      .select()
-      .single();
-
-    if (error) {
-      setStatus('Save failed: ' + error.message, 'error');
-      return;
-    }
-
-    entries.push(data);
-    render();
-    setStatus('Added: ' + decodedText, 'flash');
+  function showBanner(success, mainText, subText) {
+    clearTimeout(bannerTimeout);
+    bannerEl.className = 'banner show ' + (success ? 'success' : 'failure');
+    bannerIcon.textContent = success ? '✅' : '⚠️';
+    bannerCode.textContent = mainText;
+    bannerSub.textContent = subText || '';
+    bannerTimeout = setTimeout(() => {
+      bannerEl.classList.remove('show');
+    }, success ? 1400 : 1800);
   }
 
-  const config = {
-    fps: 15,
-    // Larger box = don't need to line the barcode up perfectly in a tiny target.
-    qrbox: (viewfinderWidth, viewfinderHeight) => {
-      const w = Math.floor(viewfinderWidth * 0.9);
-      const h = Math.floor(viewfinderHeight * 0.5);
-      return { width: w, height: h };
-    },
-    aspectRatio: 1.5,
-    disableFlip: false,
-    // Use the browser's native barcode detector when available — faster and
-    // more tolerant of angle/blur than the pure-JS fallback scanner.
-    experimentalFeatures: {
-      useBarCodeDetectorIfSupported: true
-    },
-    videoConstraints: {
-      facingMode: "environment",
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
-      // Request continuous autofocus where supported, so close-up barcodes
-      // aren't stuck out of focus.
-      advanced: [{ focusMode: "continuous" }]
-    }
-  };
-  let cameraStarted = false;
-  let html5QrCode;
+  // ---- Camera preview (no continuous scanning) ----
+  const videoEl = document.getElementById('preview');
+  const startBtn = document.getElementById('startBtn');
+  const captureBtn = document.getElementById('captureBtn');
+  let stream = null;
 
-  document.getElementById('startBtn').addEventListener('click', async () => {
-    if (cameraStarted) return;
-
+  startBtn.addEventListener('click', async () => {
     if (!window.isSecureContext) {
       setStatus('Camera blocked: page is not served over HTTPS.', 'error');
       return;
     }
-
-    if (typeof Html5Qrcode === 'undefined') {
-      setStatus('Scanner library failed to load (check network/CDN access).', 'error');
-      return;
-    }
-
     setStatus('Requesting camera permission…');
-
     try {
-      html5QrCode = new Html5Qrcode("reader");
-      // Prefer the back camera; fall back to any camera if that fails.
-      await html5QrCode.start(
-        config.videoConstraints,
-        config,
-        onScanSuccess,
-        () => {}
-      );
-      cameraStarted = true;
-      setStatus('Point camera at a barcode');
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "environment",
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: "continuous" }]
+        },
+        audio: false
+      });
+      videoEl.srcObject = stream;
+      captureBtn.disabled = false;
+      setStatus('Camera ready — line up the barcode and tap Capture');
     } catch (err) {
-      try {
-        const cameras = await Html5Qrcode.getCameras();
-        if (!cameras || cameras.length === 0) {
-          setStatus('No camera found on this device.', 'error');
-          return;
-        }
-        await html5QrCode.start(
-          cameras[0].id,
-          config,
-          onScanSuccess,
-          () => {}
-        );
-        cameraStarted = true;
-        setStatus('Point camera at a barcode');
-      } catch (err2) {
-        setStatus('Camera error: ' + (err2.message || err2), 'error');
-      }
+      setStatus('Camera error: ' + (err.message || err), 'error');
     }
+  });
+
+  // A hidden Html5Qrcode instance used purely for decoding a still image,
+  // never attached to the live camera stream.
+  const fileScanner = new Html5Qrcode("hidden-file-reader", /* verbose= */ false);
+
+  captureBtn.addEventListener('click', async () => {
+    if (!stream) return;
+    captureBtn.disabled = true;
+    setStatus('Decoding…');
+
+    const canvas = document.createElement('canvas');
+    canvas.width = videoEl.videoWidth;
+    canvas.height = videoEl.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob(async (blob) => {
+      // The captured frame lives only in memory as this Blob — it is never
+      // written to device storage, uploaded, or saved anywhere. Once this
+      // function finishes, the Blob and canvas are discarded automatically.
+      if (!blob) {
+        showBanner(false, 'Capture failed', 'Could not read frame from camera');
+        setStatus('Camera ready — line up the barcode and tap Capture');
+        captureBtn.disabled = false;
+        return;
+      }
+
+      const file = new File([blob], 'capture.png', { type: 'image/png' });
+
+      try {
+        const result = await fileScanner.scanFileV2(file, /* showImage= */ false);
+        const code = result.decodedText;
+
+        const { data, error } = await supabaseClient
+          .from(TABLE)
+          .insert({ code })
+          .select()
+          .single();
+
+        if (error) {
+          showBanner(false, 'Save failed', error.message);
+        } else {
+          entries.push(data);
+          render();
+          showBanner(true, code, 'Added to spreadsheet');
+        }
+      } catch (decodeErr) {
+        showBanner(false, 'No barcode detected', 'Try again — get closer or reduce glare');
+      } finally {
+        setStatus('Camera ready — line up the barcode and tap Capture');
+        captureBtn.disabled = false;
+      }
+    }, 'image/png');
   });
 
   document.getElementById('downloadBtn').addEventListener('click', () => {
@@ -305,11 +357,10 @@
         return;
       }
       if (liveVersion === APP_VERSION) {
-        setStatus('You already have the latest version (' + APP_VERSION + ').', 'flash');
+        setStatus('You already have the latest version (' + APP_VERSION + ').');
         return;
       }
-      setStatus('Update found (' + liveVersion + ') — reloading…', 'flash');
-      // Force a cache-bypassing reload by navigating to a cache-busted URL.
+      setStatus('Update found (' + liveVersion + ') — reloading…');
       setTimeout(() => {
         window.location.href = bustUrl;
       }, 800);
