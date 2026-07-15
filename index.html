@@ -47,6 +47,18 @@
     object-fit: cover;
     display: block;
   }
+  #guideBox {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 80%;
+    height: 40%;
+    border: 3px dashed rgba(79, 140, 255, 0.85);
+    border-radius: 10px;
+    pointer-events: none;
+    box-shadow: 0 0 0 2000px rgba(0,0,0,0.25);
+  }
   .status {
     text-align: center;
     margin: 10px 0;
@@ -136,6 +148,7 @@
 
   <div id="videoWrap">
     <video id="preview" autoplay muted playsinline></video>
+    <div id="guideBox"></div>
   </div>
   <div class="status" id="status">Tap "Start Camera" to begin</div>
 
@@ -168,7 +181,7 @@
 <script>
   // Bump this string whenever the app is updated — makes it easy to confirm
   // you're looking at the latest deployed version.
-  const APP_VERSION = '2026-07-14.4';
+  const APP_VERSION = '2026-07-14.5';
 
   const statusEl = document.getElementById('status');
   const logEl = document.getElementById('log');
@@ -313,52 +326,98 @@
   captureBtn.addEventListener('click', async () => {
     if (!stream) return;
     captureBtn.disabled = true;
-    setStatus('Decoding…');
 
-    const canvas = document.createElement('canvas');
-    canvas.width = videoEl.videoWidth;
-    canvas.height = videoEl.videoHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+    // Give autofocus a moment to settle before grabbing frames — this alone
+    // fixes a lot of blurry-capture failures.
+    setStatus('Focusing…');
+    await new Promise(r => setTimeout(r, 350));
 
-    canvas.toBlob(async (blob) => {
-      // The captured frame lives only in memory as this Blob — it is never
-      // written to device storage, uploaded, or saved anywhere. Once this
-      // function finishes, the Blob and canvas are discarded automatically.
-      if (!blob) {
-        showBanner(false, 'Capture failed', 'Could not read frame from camera');
-        setStatus('Camera ready — line up the barcode and tap Capture');
-        captureBtn.disabled = false;
-        return;
+    const MAX_ATTEMPTS = 4;
+    let decoded = null;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !decoded; attempt++) {
+      setStatus(`Decoding (attempt ${attempt}/${MAX_ATTEMPTS})…`);
+      decoded = await tryDecodeFrame();
+      if (!decoded && attempt < MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, 250));
       }
+    }
 
-      const file = new File([blob], 'capture.png', { type: 'image/png' });
+    if (decoded) {
+      const { data, error } = await supabaseClient
+        .from(TABLE)
+        .insert({ code: decoded })
+        .select()
+        .single();
 
-      try {
-        const result = await fileScanner.scanFileV2(file, /* showImage= */ false);
-        const code = result.decodedText;
-
-        const { data, error } = await supabaseClient
-          .from(TABLE)
-          .insert({ code })
-          .select()
-          .single();
-
-        if (error) {
-          showBanner(false, 'Save failed', error.message);
-        } else {
-          entries.push(data);
-          render();
-          showBanner(true, code, 'Added to spreadsheet');
-        }
-      } catch (decodeErr) {
-        showBanner(false, 'No barcode detected', 'Try again — get closer or reduce glare');
-      } finally {
-        setStatus('Camera ready — line up the barcode and tap Capture');
-        captureBtn.disabled = false;
+      if (error) {
+        showBanner(false, 'Save failed', error.message);
+      } else {
+        entries.push(data);
+        render();
+        showBanner(true, decoded, 'Added to spreadsheet');
       }
-    }, 'image/png');
+    } else {
+      showBanner(false, 'No barcode detected', 'Align it inside the box, get closer, and hold steady');
+    }
+
+    setStatus('Camera ready — line up the barcode and tap Capture');
+    captureBtn.disabled = false;
   });
+
+  // Grabs one frame, tries a tight upscaled crop (matching the on-screen
+  // guide box) first since that reads far more reliably, then falls back to
+  // the full frame. Returns decoded text or null. Nothing is ever saved to
+  // disk — canvases and blobs here only ever live in memory for this call.
+  async function tryDecodeFrame() {
+    const fullCanvas = document.createElement('canvas');
+    fullCanvas.width = videoEl.videoWidth;
+    fullCanvas.height = videoEl.videoHeight;
+    const fullCtx = fullCanvas.getContext('2d');
+    fullCtx.drawImage(videoEl, 0, 0, fullCanvas.width, fullCanvas.height);
+
+    // Crop to the same proportions as the visible guide box (80% wide,
+    // 40% tall, centered), then upscale 2x — a tighter, larger image of
+    // just the barcode decodes far more reliably than the full frame.
+    const cropW = fullCanvas.width * 0.8;
+    const cropH = fullCanvas.height * 0.4;
+    const cropX = (fullCanvas.width - cropW) / 2;
+    const cropY = (fullCanvas.height - cropH) / 2;
+
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = cropW * 2;
+    cropCanvas.height = cropH * 2;
+    const cropCtx = cropCanvas.getContext('2d');
+    cropCtx.imageSmoothingEnabled = true;
+    cropCtx.drawImage(
+      fullCanvas,
+      cropX, cropY, cropW, cropH,
+      0, 0, cropCanvas.width, cropCanvas.height
+    );
+
+    // Try the cropped/zoomed version first.
+    let result = await decodeCanvas(cropCanvas);
+    if (result) return result;
+
+    // Fall back to the full frame in case the code wasn't inside the guide.
+    result = await decodeCanvas(fullCanvas);
+    return result;
+  }
+
+  function decodeCanvas(canvas) {
+    return new Promise((resolve) => {
+      canvas.toBlob(async (blob) => {
+        if (!blob) { resolve(null); return; }
+        const file = new File([blob], 'capture.png', { type: 'image/png' });
+        try {
+          const result = await fileScanner.scanFileV2(file, false);
+          resolve(result.decodedText);
+        } catch (e) {
+          resolve(null);
+        }
+      }, 'image/png');
+    });
+  }
 
   document.getElementById('downloadBtn').addEventListener('click', () => {
     const ws = XLSX.utils.aoa_to_sheet(entries.map(r => [r.code]));
