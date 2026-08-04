@@ -211,7 +211,7 @@
     throw e;
   }
 
-  const TABLE = 'scans';
+  const TABLE = 'scanner_scans';
   let entries = []; // [{id, code}]
 
   function setStatus(msg, cls) {
@@ -456,7 +456,7 @@
 
   // Live updates if you scan from multiple devices/sessions
   supabaseClient
-    .channel('scans-changes')
+    .channel('scanner_scans-changes')
     .on('postgres_changes', { event: '*', schema: 'public', table: TABLE }, loadEntries)
     .subscribe();
 </script>
